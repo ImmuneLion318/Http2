@@ -26,7 +26,7 @@ public class Library : BlockRequest
         Dictionary<string, string> Headers,
         Dictionary<string, string> Cookies,
         int Timeout,
-        bool OutputRaw,
+        bool RawOutput,
         string ContentType = "application/x-www-form-urlencoded",
         string Version = "2.0")
     {
@@ -37,10 +37,14 @@ public class Library : BlockRequest
             _ => new Version(1, 1),
         };
 
-        HttpClientHandler? Handler = new HttpClientHandler { };
+        using HttpClientHandler Handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = AutoRedirect
+        };
+
         if (Data.Proxy != null)
         {
-            WebProxy? Proxy = new WebProxy(Data.Proxy.Host, Data.Proxy.Port);
+            WebProxy Proxy = new WebProxy(Data.Proxy.Host, Data.Proxy.Port);
 
             if (Data.Proxy.NeedsAuthentication)
                 Proxy.Credentials = new NetworkCredential(Data.Proxy.Username, Data.Proxy.Password);
@@ -48,74 +52,71 @@ public class Library : BlockRequest
             Handler.Proxy = Proxy;
         }
 
-        using HttpClient? Client = new HttpClient(Handler)
+        using HttpClient Client = new HttpClient(Handler)
         {
             DefaultRequestVersion = HttpVersion,
-            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+            Timeout = Timeout > 0 ? TimeSpan.FromSeconds(Timeout) : TimeSpan.FromSeconds(60)
         };
 
-        HttpRequestMessage? Request = new HttpRequestMessage(new HttpMethod(Method.ToString()), Url);
+        HttpRequestMessage Request = new HttpRequestMessage(new HttpMethod(Method.ToString()), Url)
+        {
+            Content = Body != string.Empty ? new StringContent(Body, Encoding.UTF8, ContentType) : null,
+        };
 
-        if (Body != string.Empty)
-            Request.Content = new StringContent(Body, Encoding.UTF8, ContentType);
+        foreach (KeyValuePair<string, string> Header in Headers ?? [])
+            Request.Headers.Add(Header.Key, Header.Value);
 
-        if (Headers != null)
-            foreach (KeyValuePair<string, string> Header in Headers)
-                Request.Headers.Add(Header.Key, Header.Value);
+        if (Cookies?.Count > 0)
+            Request.Headers.Add("Cookie", string.Join("; ", Cookies.Select(x => $"{x.Key}={x.Value}")));
 
-        if (Cookies != null)
-            foreach (KeyValuePair<string, string> Cookie in Cookies)
-                Request.Headers.Add("Cookie", $"{Cookie.Key}={Cookie.Value}");
-
-        if (Timeout > 0)
-            Client.Timeout = TimeSpan.FromSeconds(Timeout);
-
-        if (!AutoRedirect)
-            Handler.AllowAutoRedirect = false;
-
-        HttpResponseMessage? Response = await Client.SendAsync(Request);
+        HttpResponseMessage Response = await Client.SendAsync(Request);
 
         byte[] Buffer = await Response.Content.ReadAsByteArrayAsync();
+        string Content = Encoding.UTF8.GetString(Buffer);
 
-        string? Content = Encoding.UTF8.GetString(Buffer);
-
+        #region Request-Logging
         Data.Logger.Log(">> Http2Request\n", LogColors.DarkOrchid);
 
-        #region Data
-        Data.Logger.Log($"{Method} / HTTP/{HttpVersion}", LogColors.WhiteSmoke);
-        Data.Logger.Log($"Host: {Url.Replace("https://", string.Empty)}", LogColors.WhiteSmoke);
-        Data.Logger.Log($"Connection: {Request.Headers.Connection}", LogColors.WhiteSmoke);
-        Data.Logger.Log($"User-Agent: {Request.Headers.UserAgent}", LogColors.WhiteSmoke);
-        Data.Logger.Log($"Pragma: {Request.Headers.Pragma}", LogColors.WhiteSmoke);
-        Data.Logger.Log($"Accept: {Request.Headers.Accept}", LogColors.WhiteSmoke);
-        Data.Logger.Log($"Accept-Language: {Request.Headers.AcceptLanguage}\n\n", LogColors.WhiteSmoke);
+        Data.Logger.Log($"Request Method: {Method} / HTTP/{HttpVersion}", LogColors.WhiteSmoke);
+        Data.Logger.Log($"Url: {Url}", LogColors.WhiteSmoke);
+
+        if (Headers?.Count > 0)
+        {
+            Data.Logger.Log("Request Headers:", LogColors.WhiteSmoke);
+            foreach (KeyValuePair<string, string> Header in Headers)
+                Data.Logger.Log($"  {Header.Key}: {Header.Value}", LogColors.WhiteSmoke);
+        }
+
+        if (Cookies?.Count > 0)
+        {
+            Data.Logger.Log("Request Cookies:", LogColors.WhiteSmoke);
+            foreach (KeyValuePair<string, string> Cookie in Cookies)
+                Data.Logger.Log($"  {Cookie.Key}={Cookie.Value}", LogColors.WhiteSmoke);
+        }
+
+        if (Body != string.Empty)
+            Data.Logger.Log($"Request Body: {Body}", LogColors.WhiteSmoke);
         #endregion
 
-        #region Status
+        #region Response-Logging
         Data.Logger.Log($"Response Code: {Response.StatusCode}\n", LogColors.Yellow);
-        #endregion
 
-        #region Headers
-        Data.Logger.Log("Received Headers:\n", LogColors.BluePurple);
-
-        if (Response.Headers != null)
+        if (Response.Headers?.Count() > 0)
+        {
+            Data.Logger.Log("Received Headers:", LogColors.BluePurple);
             foreach (KeyValuePair<string, IEnumerable<string>> Header in Response.Headers)
-            {
-                string HeaderValue = string.Empty;
+                Data.Logger.Log($"  {Header.Key}: {string.Join(" ", Header.Value)}", LogColors.PurplePizzazz);
+        }
+        else
+        {
+            Data.Logger.Log("No Headers Received", LogColors.Pink);
+        }
 
-                foreach (string Value in Header.Value)
-                    HeaderValue += $"{Value} ";
+        Data.Logger.Log("Received Payload:", LogColors.AndroidGreen);
 
-                Data.Logger.Log($"{Header.Key}: {HeaderValue}", LogColors.PurplePizzazz);
-            }
-        else Data.Logger.Log("No Headers Received", LogColors.Pink);
-        #endregion
-
-        #region Payload
-        Data.Logger.Log("Received Payload:\n", LogColors.AndroidGreen);
-
-        if (OutputRaw)
-            Data.Logger.Log(string.Join(", ", Buffer.Select(b => $"0x{b:X2}")), LogColors.Amber);
+        if (RawOutput)
+            Data.Logger.Log(string.Join(", ", Buffer.Select(x => $"0x{x:X2}")), LogColors.Amber);
 
         Data.Logger.Log($"{Content}", LogColors.CaribbeanGreen);
         #endregion
